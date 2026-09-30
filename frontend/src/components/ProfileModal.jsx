@@ -4,7 +4,7 @@ import { soundFx } from "../utils/soundEngine"
 export function ProfileModal({ profile, characters = [], onSave, onClose }) {
   const [name, setName] = useState(profile?.name || "")
   const [avatar, setAvatar] = useState(profile?.avatar || "owl")
-  const [pitch, setPitch] = useState(profile?.pitch || 1.7)
+  const [pitch, setPitch] = useState(profile?.pitch || 1.5)
   const [speed, setSpeed] = useState(profile?.speed || 1.1)
 
   const handleSave = (e) => {

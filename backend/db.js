@@ -46,7 +46,7 @@ try { db.exec("ALTER TABLE chats ADD COLUMN user_id INTEGER") } catch(e) {}
 try { db.exec("ALTER TABLE chats ADD COLUMN character TEXT DEFAULT 'owl'") } catch(e) {}
 try { db.exec("ALTER TABLE messages ADD COLUMN user_id INTEGER") } catch(e) {}
 try { db.exec("ALTER TABLE users ADD COLUMN avatar TEXT DEFAULT 'owl'") } catch(e) {}
-try { db.exec("ALTER TABLE users ADD COLUMN pitch REAL DEFAULT 1.7") } catch(e) {}
+try { db.exec("ALTER TABLE users ADD COLUMN pitch REAL DEFAULT 1.5") } catch(e) {}
 try { db.exec("ALTER TABLE users ADD COLUMN speed REAL DEFAULT 1.1") } catch(e) {}
 
 module.exports = db

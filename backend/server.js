@@ -186,7 +186,7 @@ app.post("/api/auth/register", (req, res) => {
   const info = db.prepare(`
     INSERT INTO users (email, password, name, avatar, pitch, speed)
     VALUES (?, ?, ?, ?, ?, ?)
-  `).run(cleanEmail, hashedPwd, cleanName, avatar || "owl", pitch || 1.7, speed || 1.1)
+  `).run(cleanEmail, hashedPwd, cleanName, avatar || "owl", pitch || 1.5, speed || 1.1)
 
   const userId = info.lastInsertRowid
   const token = generateToken(userId)
@@ -200,7 +200,7 @@ app.post("/api/auth/register", (req, res) => {
       email: cleanEmail,
       name: cleanName,
       avatar: avatar || "owl",
-      pitch: pitch || 1.7,
+      pitch: pitch || 1.5,
       speed: speed || 1.1
     }
   })

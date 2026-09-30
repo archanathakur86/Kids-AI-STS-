@@ -9,7 +9,7 @@ export function AuthModal({ characters = [], onLoginSuccess, onRegisterSuccess }
   const [regPassword, setRegPassword] = useState("")
   const [regName, setRegName] = useState("")
   const [regAvatar, setRegAvatar] = useState("owl")
-  const [regPitch, setRegPitch] = useState(1.7)
+  const [regPitch, setRegPitch] = useState(1.5)
   const [regSpeed, setRegSpeed] = useState(1.1)
 
   // Login fields

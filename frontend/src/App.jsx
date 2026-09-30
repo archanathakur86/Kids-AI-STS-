@@ -265,7 +265,7 @@ function App() {
     const prefVoice = voices.find(v => /female|zira|samantha|google uk english female|google hindi|victoria|karen/i.test(v.name)) || voices[0]
     if (prefVoice) utter.voice = prefVoice
 
-    utter.pitch = user?.pitch || 1.7
+    utter.pitch = user?.pitch || 1.5
     utter.rate = user?.speed || 1.1
 
     utter.onstart = () => setSpeaking(true)
