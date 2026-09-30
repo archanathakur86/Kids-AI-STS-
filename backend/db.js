@@ -7,7 +7,7 @@ CREATE TABLE IF NOT EXISTS users (
   password TEXT NOT NULL,
   name TEXT NOT NULL,
   avatar TEXT DEFAULT 'owl',
-  pitch REAL DEFAULT 1.7,
+  pitch REAL DEFAULT 1.5,
   speed REAL DEFAULT 1.1,
   created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
