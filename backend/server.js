@@ -2,6 +2,7 @@ const path = require("path")
 const express = require("express")
 const cors = require("cors")
 const crypto = require("crypto")
+const bcrypt = require("bcryptjs")
 const { Groq } = require("groq-sdk")
 require("dotenv").config()
 const db = require("./db")
@@ -79,8 +80,28 @@ if (GROQ_MODELS.length === 0) {
   )
 }
 
+// Passwords are stored as bcrypt( SHA-256(password + pepper) ).
+// SHA-256 pre-hash keeps input fixed-length (bcrypt only reads 72 bytes),
+// bcrypt adds a per-user salt + adaptive cost against brute-force.
+const PEPPER = process.env.PASSWORD_PEPPER || "whyso_salt_2026"
+const BCRYPT_ROUNDS = 10
+
+function sha256(pwd) {
+  return crypto.createHash("sha256").update(pwd + PEPPER).digest("hex")
+}
+
 function hashPassword(pwd) {
-  return crypto.createHash("sha256").update(pwd + "whyso_salt_2026").digest("hex")
+  return bcrypt.hash(sha256(pwd), BCRYPT_ROUNDS)
+}
+
+const isBcryptHash = (h) => typeof h === "string" && h.startsWith("$2")
+
+// Supports old accounts (plain SHA-256 hex) so nobody gets locked out.
+async function verifyPassword(pwd, stored) {
+  if (isBcryptHash(stored)) return bcrypt.compare(sha256(pwd), stored)
+  const a = Buffer.from(sha256(pwd))
+  const b = Buffer.from(String(stored))
+  return a.length === b.length && crypto.timingSafeEqual(a, b)
 }
 
 function generateToken(userId) {
@@ -162,7 +183,7 @@ app.get("/api/characters", (req, res) => {
 })
 
 // Auth Endpoints
-app.post("/api/auth/register", (req, res) => {
+app.post("/api/auth/register", async (req, res) => {
   const { email, password, name, avatar, pitch, speed } = req.body
   if (!email || !email.trim() || !email.includes("@")) {
     return res.status(400).json({ error: "Please enter a valid email address." })
@@ -182,7 +203,7 @@ app.post("/api/auth/register", (req, res) => {
     return res.status(400).json({ error: "Email is already registered! Please log in instead." })
   }
 
-  const hashedPwd = hashPassword(password)
+  const hashedPwd = await hashPassword(password)
   const info = db.prepare(`
     INSERT INTO users (email, password, name, avatar, pitch, speed)
     VALUES (?, ?, ?, ?, ?, ?)
@@ -206,21 +227,25 @@ app.post("/api/auth/register", (req, res) => {
   })
 })
 
-app.post("/api/auth/login", (req, res) => {
+app.post("/api/auth/login", async (req, res) => {
   const { email, password } = req.body
   if (!email || !password) {
     return res.status(400).json({ error: "Email and password are required." })
   }
 
   const cleanEmail = email.trim().toLowerCase()
-  const hashedPwd = hashPassword(password)
+  const row = db.prepare("SELECT id, email, name, avatar, pitch, speed, password FROM users WHERE email = ?").get(cleanEmail)
 
-  const user = db.prepare("SELECT id, email, name, avatar, pitch, speed FROM users WHERE email = ? AND password = ?").get(cleanEmail, hashedPwd)
-
-  if (!user) {
+  if (!row || !(await verifyPassword(password, row.password))) {
     return res.status(401).json({ error: "Incorrect email or password! Please check and try again." })
   }
 
+  // Silently upgrade legacy SHA-256 accounts to bcrypt on successful login
+  if (!isBcryptHash(row.password)) {
+    db.prepare("UPDATE users SET password = ? WHERE id = ?").run(await hashPassword(password), row.id)
+  }
+
+  const { password: _pw, ...user } = row
   const token = generateToken(user.id)
   db.prepare("INSERT INTO user_sessions (token, user_id) VALUES (?, ?)").run(token, user.id)
 
