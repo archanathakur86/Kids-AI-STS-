@@ -17,16 +17,6 @@
 
 </div>
 
----
-
-## 📸 Preview
-
-<!-- Add 2-3 screenshots or a GIF here. Recruiters love visuals! -->
-<!-- <p align="center"><img src="docs/demo.gif" width="80%" /></p> -->
-
-> 🎬 *Screenshots / demo GIF coming soon.*
-
----
 
 ## ✨ Why WhySo?
 
