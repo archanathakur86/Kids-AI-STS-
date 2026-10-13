@@ -5,7 +5,7 @@ const crypto = require("crypto")
 const bcrypt = require("bcryptjs")
 const { Groq } = require("groq-sdk")
 require("dotenv").config()
-const db = require("./db")
+const { connectDB, User, Session, Chat, Message, mongoose } = require("./db")
 
 const app = express()
 app.use(cors())
@@ -94,14 +94,8 @@ function hashPassword(pwd) {
   return bcrypt.hash(sha256(pwd), BCRYPT_ROUNDS)
 }
 
-const isBcryptHash = (h) => typeof h === "string" && h.startsWith("$2")
-
-// Supports old accounts (plain SHA-256 hex) so nobody gets locked out.
-async function verifyPassword(pwd, stored) {
-  if (isBcryptHash(stored)) return bcrypt.compare(sha256(pwd), stored)
-  const a = Buffer.from(sha256(pwd))
-  const b = Buffer.from(String(stored))
-  return a.length === b.length && crypto.timingSafeEqual(a, b)
+function verifyPassword(pwd, stored) {
+  return bcrypt.compare(sha256(pwd), String(stored))
 }
 
 function generateToken(userId) {
@@ -158,28 +152,36 @@ async function generateCompletion(messages) {
 }
 
 // Auth Middleware
-function authenticateUser(req, res, next) {
+async function authenticateUser(req, res, next) {
   const authHeader = req.headers.authorization
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
     return res.status(401).json({ error: "Unauthorized. Please log in." })
   }
   const token = authHeader.split(" ")[1]
-  const session = db.prepare("SELECT user_id FROM user_sessions WHERE token = ?").get(token)
+  const session = await Session.findOne({ token }).lean()
   if (!session) {
     return res.status(401).json({ error: "Session expired or invalid token. Please log in again." })
   }
-  const user = db.prepare("SELECT id, email, name, avatar, pitch, speed FROM users WHERE id = ?").get(session.user_id)
+  const user = await User.findById(session.userId).select("-password")
   if (!user) {
     return res.status(401).json({ error: "User not found." })
   }
-  req.user = user
+  req.user = user.toJSON()      // { id, email, name, avatar, pitch, speed }
+  req.userId = user._id         // ObjectId (queries ke liye)
   req.token = token
   next()
 }
 
+const validId = (id) => mongoose.isValidObjectId(id)
+
 // Public endpoints
 app.get("/api/characters", (req, res) => {
   res.json(Object.values(CHARACTERS))
+})
+
+// Health check (Render ke liye)
+app.get("/api/health", (req, res) => {
+  res.json({ ok: true, db: mongoose.connection.readyState === 1 })
 })
 
 // Auth Endpoints
@@ -198,33 +200,32 @@ app.post("/api/auth/register", async (req, res) => {
   const cleanEmail = email.trim().toLowerCase()
   const cleanName = name.trim()
 
-  const existing = db.prepare("SELECT id FROM users WHERE email = ?").get(cleanEmail)
-  if (existing) {
+  if (await User.exists({ email: cleanEmail })) {
     return res.status(400).json({ error: "Email is already registered! Please log in instead." })
   }
 
-  const hashedPwd = await hashPassword(password)
-  const info = db.prepare(`
-    INSERT INTO users (email, password, name, avatar, pitch, speed)
-    VALUES (?, ?, ?, ?, ?, ?)
-  `).run(cleanEmail, hashedPwd, cleanName, avatar || "owl", pitch || 1.5, speed || 1.1)
-
-  const userId = info.lastInsertRowid
-  const token = generateToken(userId)
-
-  db.prepare("INSERT INTO user_sessions (token, user_id) VALUES (?, ?)").run(token, userId)
-
-  res.json({
-    token,
-    user: {
-      id: userId,
+  let user
+  try {
+    user = await User.create({
       email: cleanEmail,
+      password: await hashPassword(password),
       name: cleanName,
       avatar: avatar || "owl",
       pitch: pitch || 1.5,
       speed: speed || 1.1
+    })
+  } catch (err) {
+    if (err.code === 11000) {
+      return res.status(400).json({ error: "Email is already registered! Please log in instead." })
     }
-  })
+    throw err
+  }
+
+  const token = generateToken(user._id)
+  await Session.create({ token, userId: user._id })
+
+  const { password: _pw, ...safeUser } = user.toJSON()
+  res.json({ token, user: safeUser })
 })
 
 app.post("/api/auth/login", async (req, res) => {
@@ -234,26 +235,21 @@ app.post("/api/auth/login", async (req, res) => {
   }
 
   const cleanEmail = email.trim().toLowerCase()
-  const row = db.prepare("SELECT id, email, name, avatar, pitch, speed, password FROM users WHERE email = ?").get(cleanEmail)
+  const row = await User.findOne({ email: cleanEmail })
 
   if (!row || !(await verifyPassword(password, row.password))) {
     return res.status(401).json({ error: "Incorrect email or password! Please check and try again." })
   }
 
-  // Silently upgrade legacy SHA-256 accounts to bcrypt on successful login
-  if (!isBcryptHash(row.password)) {
-    db.prepare("UPDATE users SET password = ? WHERE id = ?").run(await hashPassword(password), row.id)
-  }
+  const token = generateToken(row._id)
+  await Session.create({ token, userId: row._id })
 
-  const { password: _pw, ...user } = row
-  const token = generateToken(user.id)
-  db.prepare("INSERT INTO user_sessions (token, user_id) VALUES (?, ?)").run(token, user.id)
-
+  const { password: _pw, ...user } = row.toJSON()
   res.json({ token, user })
 })
 
-app.post("/api/auth/logout", authenticateUser, (req, res) => {
-  db.prepare("DELETE FROM user_sessions WHERE token = ?").run(req.token)
+app.post("/api/auth/logout", authenticateUser, async (req, res) => {
+  await Session.deleteOne({ token: req.token })
   res.json({ ok: true })
 })
 
@@ -261,69 +257,71 @@ app.get("/api/auth/me", authenticateUser, (req, res) => {
   res.json({ user: req.user })
 })
 
-app.post("/api/profile", authenticateUser, (req, res) => {
+app.post("/api/profile", authenticateUser, async (req, res) => {
   const { name, avatar, pitch, speed } = req.body
-  const cleanName = name && name.trim() ? name.trim() : req.user.name
-  const cleanAvatar = avatar || req.user.avatar || "owl"
-  const cleanPitch = pitch !== undefined ? pitch : req.user.pitch
-  const cleanSpeed = speed !== undefined ? speed : req.user.speed
-
-  db.prepare(`
-    UPDATE users SET name = ?, avatar = ?, pitch = ?, speed = ? WHERE id = ?
-  `).run(cleanName, cleanAvatar, cleanPitch, cleanSpeed, req.user.id)
-
-  const updatedUser = db.prepare("SELECT id, email, name, avatar, pitch, speed FROM users WHERE id = ?").get(req.user.id)
-  res.json({ user: updatedUser })
+  const update = {
+    name: name && name.trim() ? name.trim() : req.user.name,
+    avatar: avatar || req.user.avatar || "owl",
+    pitch: pitch !== undefined ? pitch : req.user.pitch,
+    speed: speed !== undefined ? speed : req.user.speed
+  }
+  const updated = await User.findByIdAndUpdate(req.userId, update, { new: true }).select("-password")
+  res.json({ user: updated.toJSON() })
 })
 
 // Protected User Chat Endpoints
-app.get("/api/chats", authenticateUser, (req, res) => {
-  const chats = db.prepare("SELECT id, title, character, created_at FROM chats WHERE user_id = ? ORDER BY id DESC").all(req.user.id)
-  res.json(chats)
+app.get("/api/chats", authenticateUser, async (req, res) => {
+  const chats = await Chat.find({ userId: req.userId }).sort({ _id: -1 }).select("title character createdAt")
+  res.json(chats.map((c) => c.toJSON()))
 })
 
-app.post("/api/chats", authenticateUser, (req, res) => {
+app.post("/api/chats", authenticateUser, async (req, res) => {
   const character = req.body.character || req.user.avatar || "owl"
-  const last = db.prepare("SELECT id FROM chats WHERE user_id = ? ORDER BY id DESC LIMIT 1").get(req.user.id)
+  const last = await Chat.findOne({ userId: req.userId }).sort({ _id: -1 }).select("_id")
   let seed = null
 
   if (last) {
-    const prev = db.prepare("SELECT role, content FROM messages WHERE chat_id = ? AND user_id = ? ORDER BY id DESC LIMIT 15").all(last.id, req.user.id).reverse()
-    if (prev.length) seed = JSON.stringify(prev)
+    const prev = (await Message.find({ chatId: last._id, userId: req.userId })
+      .sort({ _id: -1 }).limit(15).select("role content").lean()).reverse()
+    if (prev.length) seed = JSON.stringify(prev.map((m) => ({ role: m.role, content: m.content })))
   }
 
-  const info = db.prepare("INSERT INTO chats (user_id, title, seed, character) VALUES (?, ?, ?, ?)").run(req.user.id, "New Adventure", seed, character)
-  res.json({ id: info.lastInsertRowid, title: "New Adventure", character })
+  const chat = await Chat.create({ userId: req.userId, title: "New Adventure", seed, character })
+  res.json({ id: String(chat._id), title: "New Adventure", character })
 })
 
-app.get("/api/chats/:id/messages", authenticateUser, (req, res) => {
-  const chat = db.prepare("SELECT id FROM chats WHERE id = ? AND user_id = ?").get(req.params.id, req.user.id)
+app.get("/api/chats/:id/messages", authenticateUser, async (req, res) => {
+  if (!validId(req.params.id)) return res.status(404).json({ error: "Chat not found or access denied." })
+  const chat = await Chat.exists({ _id: req.params.id, userId: req.userId })
   if (!chat) return res.status(404).json({ error: "Chat not found or access denied." })
 
-  const msgs = db.prepare("SELECT role, content FROM messages WHERE chat_id = ? AND user_id = ? ORDER BY id ASC").all(req.params.id, req.user.id)
+  const msgs = await Message.find({ chatId: req.params.id, userId: req.userId })
+    .sort({ _id: 1 }).select("role content -_id").lean()
   res.json(msgs)
 })
 
-app.delete("/api/chats/:id", authenticateUser, (req, res) => {
-  const chat = db.prepare("SELECT id FROM chats WHERE id = ? AND user_id = ?").get(req.params.id, req.user.id)
+app.delete("/api/chats/:id", authenticateUser, async (req, res) => {
+  if (!validId(req.params.id)) return res.status(404).json({ error: "Chat not found or access denied." })
+  const chat = await Chat.exists({ _id: req.params.id, userId: req.userId })
   if (!chat) return res.status(404).json({ error: "Chat not found or access denied." })
 
-  db.prepare("DELETE FROM messages WHERE chat_id = ? AND user_id = ?").run(req.params.id, req.user.id)
-  db.prepare("DELETE FROM chats WHERE id = ? AND user_id = ?").run(req.params.id, req.user.id)
+  await Message.deleteMany({ chatId: req.params.id, userId: req.userId })
+  await Chat.deleteOne({ _id: req.params.id, userId: req.userId })
   res.json({ ok: true })
 })
 
 app.post("/api/chat", authenticateUser, async (req, res) => {
   const { chatId, text, character: reqCharacter } = req.body
   if (!text || !chatId) return res.status(400).json({ error: "chatId and text required" })
+  if (!validId(chatId)) return res.status(404).json({ error: "Chat not found or access denied." })
 
   try {
-    const chat = db.prepare("SELECT * FROM chats WHERE id = ? AND user_id = ?").get(chatId, req.user.id)
+    const chat = await Chat.findOne({ _id: chatId, userId: req.userId })
     if (!chat) return res.status(404).json({ error: "Chat not found or access denied." })
 
     const activeChar = reqCharacter || chat.character || req.user.avatar || "owl"
 
-    db.prepare("INSERT INTO messages (chat_id, user_id, role, content) VALUES (?, ?, 'user', ?)").run(chatId, req.user.id, text)
+    await Message.create({ chatId, userId: req.userId, role: "user", content: text })
 
     const messages = [{ role: "system", content: systemPrompt(req.user.name, activeChar) }]
 
@@ -338,18 +336,18 @@ app.post("/api/chat", authenticateUser, async (req, res) => {
       }
     }
 
-    const history = db.prepare("SELECT role, content FROM messages WHERE chat_id = ? AND user_id = ? ORDER BY id ASC").all(chatId, req.user.id)
+    const history = await Message.find({ chatId, userId: req.userId }).sort({ _id: 1 }).select("role content").lean()
     history.forEach(m => messages.push({ role: m.role, content: m.content }))
 
     const rawResponse = await generateCompletion(messages)
     const stripped = rawResponse
-    .replace(/(?<!\*)\*(?!\*)[^*\n]+\*(?!\*)/g, "")   
-    .replace(/\s{2,}/g, " ")
-    .trim()
+      .replace(/(?<!\*)\*(?!\*)[^*\n]+\*(?!\*)/g, "")
+      .replace(/\s{2,}/g, " ")
+      .trim()
 
-  const answer = trimWords(stripped || rawResponse, 35)
+    const answer = trimWords(stripped || rawResponse, 35)
 
-    db.prepare("INSERT INTO messages (chat_id, user_id, role, content) VALUES (?, ?, 'assistant', ?)").run(chatId, req.user.id, answer)
+    await Message.create({ chatId, userId: req.userId, role: "assistant", content: answer })
 
     if (chat.title === "New Chat" || chat.title === "New Adventure") {
       let titleText = text.trim()
@@ -358,21 +356,25 @@ app.post("/api/chat", authenticateUser, async (req, res) => {
       } else {
         titleText = titleText.split(/\s+/).slice(0, 4).join(" ")
       }
-      db.prepare("UPDATE chats SET title = ?, character = ? WHERE id = ?").run(titleText, activeChar, chatId)
+      chat.title = titleText
+      chat.character = activeChar
+      await chat.save()
     } else if (reqCharacter && reqCharacter !== chat.character) {
-      db.prepare("UPDATE chats SET character = ? WHERE id = ?").run(reqCharacter, chatId)
+      chat.character = reqCharacter
+      await chat.save()
     }
 
     res.json({ response: answer, character: activeChar })
   } catch (err) {
     console.error("Chat endpoint error:", err)
     res.json({
-      response: "Oopsie! *giggles* Something glitched, please ask me again! 🌟",
+      response: "Oopsie! Something glitched, please ask me again! 🌟",
       character: req.body?.character || req.user?.avatar || "owl",
       fallback: true
     })
   }
 })
+
 // ---- Production: built frontend serve karo ----
 const distPath = path.join(__dirname, "../frontend/dist")
 app.use(express.static(distPath))
@@ -382,21 +384,24 @@ app.use((req, res, next) => {
   }
   next()
 })
+// Unexpected errors par bhi server crash na ho
+app.use((err, req, res, next) => {
+  console.error("Unhandled error:", err)
+  res.status(500).json({ error: "Something went wrong on the server. Please try again." })
+})
+
 const PORT = process.env.PORT || 5000
-const server = app.listen(PORT, () => {
-  console.log(`WhySo Cartoon AI backend running on port ${PORT}`)
-})
 
-server.ref?.()
-
-const keepAliveTimer = setInterval(() => {}, 60 * 60 * 1000)
-
-process.on("SIGINT", () => {
-  clearInterval(keepAliveTimer)
-  server.close(() => process.exit(0))
-})
-
-process.on("SIGTERM", () => {
-  clearInterval(keepAliveTimer)
-  server.close(() => process.exit(0))
-})
+connectDB()
+  .then(() => {
+    const server = app.listen(PORT, () => {
+      console.log(`WhySo Cartoon AI backend running on port ${PORT}`)
+    })
+    const shutdown = () => server.close(() => mongoose.connection.close().then(() => process.exit(0)))
+    process.on("SIGINT", shutdown)
+    process.on("SIGTERM", shutdown)
+  })
+  .catch((err) => {
+    console.error("Failed to start:", err.message)
+    process.exit(1)
+  })

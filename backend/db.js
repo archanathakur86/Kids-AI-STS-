@@ -1,52 +1,70 @@
-const Database = require("better-sqlite3")
-const db = new Database(process.env.DB_PATH || "whyso.db")
-db.exec(`
-CREATE TABLE IF NOT EXISTS users (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  email TEXT UNIQUE NOT NULL,
-  password TEXT NOT NULL,
-  name TEXT NOT NULL,
-  avatar TEXT DEFAULT 'owl',
-  pitch REAL DEFAULT 1.5,
-  speed REAL DEFAULT 1.1,
-  created_at TEXT DEFAULT CURRENT_TIMESTAMP
-);
+const mongoose = require("mongoose")
 
-CREATE TABLE IF NOT EXISTS user_sessions (
-  token TEXT PRIMARY KEY,
-  user_id INTEGER NOT NULL,
-  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-);
+const toJSON = {
+  virtuals: false,
+  versionKey: false,
+  transform: (_doc, ret) => {
+    ret.id = String(ret._id)
+    ret.created_at = ret.createdAt
+    delete ret._id
+    delete ret.createdAt
+    delete ret.updatedAt
+    return ret
+  }
+}
 
-CREATE TABLE IF NOT EXISTS chats (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  user_id INTEGER NOT NULL,
-  title TEXT,
-  seed TEXT,
-  character TEXT DEFAULT 'owl',
-  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-);
+const userSchema = new mongoose.Schema(
+  {
+    email: { type: String, required: true, unique: true, lowercase: true, trim: true },
+    password: { type: String, required: true },
+    name: { type: String, required: true, trim: true },
+    avatar: { type: String, default: "owl" },
+    pitch: { type: Number, default: 1.5 },
+    speed: { type: Number, default: 1.1 }
+  },
+  { timestamps: true, toJSON }
+)
 
-CREATE TABLE IF NOT EXISTS messages (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  chat_id INTEGER NOT NULL,
-  user_id INTEGER NOT NULL,
-  role TEXT NOT NULL,
-  content TEXT NOT NULL,
-  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-  FOREIGN KEY (chat_id) REFERENCES chats(id) ON DELETE CASCADE,
-  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-);
-`)
+// Login sessions: 30 din baad MongoDB khud delete kar dega (TTL index)
+const sessionSchema = new mongoose.Schema({
+  token: { type: String, required: true, unique: true },
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+  createdAt: { type: Date, default: Date.now, expires: 60 * 60 * 24 * 30 }
+})
 
-// Safe migrations if needed
-try { db.exec("ALTER TABLE chats ADD COLUMN user_id INTEGER") } catch(e) {}
-try { db.exec("ALTER TABLE chats ADD COLUMN character TEXT DEFAULT 'owl'") } catch(e) {}
-try { db.exec("ALTER TABLE messages ADD COLUMN user_id INTEGER") } catch(e) {}
-try { db.exec("ALTER TABLE users ADD COLUMN avatar TEXT DEFAULT 'owl'") } catch(e) {}
-try { db.exec("ALTER TABLE users ADD COLUMN pitch REAL DEFAULT 1.5") } catch(e) {}
-try { db.exec("ALTER TABLE users ADD COLUMN speed REAL DEFAULT 1.1") } catch(e) {}
+const chatSchema = new mongoose.Schema(
+  {
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true, index: true },
+    title: { type: String, default: "New Adventure" },
+    seed: { type: String, default: null },
+    character: { type: String, default: "owl" }
+  },
+  { timestamps: true, toJSON }
+)
 
-module.exports = db
+const messageSchema = new mongoose.Schema(
+  {
+    chatId: { type: mongoose.Schema.Types.ObjectId, ref: "Chat", required: true, index: true },
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+    role: { type: String, enum: ["user", "assistant"], required: true },
+    content: { type: String, required: true }
+  },
+  { timestamps: true, toJSON }
+)
+
+const User = mongoose.model("User", userSchema)
+const Session = mongoose.model("Session", sessionSchema)
+const Chat = mongoose.model("Chat", chatSchema)
+const Message = mongoose.model("Message", messageSchema)
+
+async function connectDB() {
+  const uri = process.env.MONGODB_URI
+  if (!uri) {
+    throw new Error("MONGODB_URI is not set. Add it to backend/.env (local) or Render Environment variables.")
+  }
+  await mongoose.connect(uri, { serverSelectionTimeoutMS: 10000 })
+  await Promise.all([User.init(), Session.init()]) // indexes ready before serving
+  console.log("MongoDB connected")
+}
+
+module.exports = { connectDB, User, Session, Chat, Message, mongoose }
